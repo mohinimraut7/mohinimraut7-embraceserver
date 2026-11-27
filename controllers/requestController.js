@@ -4,6 +4,7 @@ const Citizen = require("../models/Citizen");
 const { segments } = require("../utils/slots");
 const { publicRequest, logActivity, refreshExpired } = require("../services/care");
 
+
 const STATUS_LABEL = { pending: "Pending", accepted: "Accepted", in_progress: "In Progress", completed: "Completed" };
 
 // Pick the caretaker whose slot covers "now", else the first active one.
