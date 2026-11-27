@@ -19,7 +19,19 @@ const caretakerSchema = new mongoose.Schema(
     userId: { type: String, trim: true, default: null },
     password: { type: String, default: null }, // stored hashed (bcrypt)
 
-    assignedCitizenId: { type: String, default: null },
+    assignedCitizenId: { type: String, default: null }, // legacy — see Assignment model
+
+    // ── Work profile (used by admin to match & assign) ──
+    serviceRole: {
+      type: String,
+      enum: ["caretaker", "nurse", "caretaker_nurse"],
+      default: "caretaker",
+    },
+    experienceYears: { type: Number, default: 0 },
+    shiftHours: { type: Number, default: 8 }, // max hours/day this person can work
+    isActive: { type: Boolean, default: true }, // admin can pause a caretaker
+    approvedAt: { type: Date, default: null },
+    rejectionReason: { type: String, default: "" },
 
     // Every field from caretakerRegistrationConfig.js — kept flexible.
     profile: { type: mongoose.Schema.Types.Mixed, default: {} },

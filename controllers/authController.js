@@ -6,36 +6,9 @@ const generateOtp = require("../utils/generateOtp");
 const sendOtp = require("../utils/sendOtp");
 const { setOtp, verifyOtp: checkOtp } = require("../utils/otpStore");
 const generateJwt = require("../utils/generateJwt");
+const { publicCitizen, publicCaretaker } = require("../services/care");
 
 const MOBILE_REGEX = /^\d{10}$/;
-
-function publicCitizen(citizen) {
-  return {
-    id: citizen._id,
-    fullName: citizen.fullName,
-    mobile: citizen.mobile,
-    email: citizen.email,
-    selectedPlan: citizen.selectedPlan,
-    assignedCaretakerId: citizen.assignedCaretakerId,
-    status: citizen.status,
-    profile: citizen.profile,
-    createdAt: citizen.createdAt,
-  };
-}
-
-function publicCaretaker(caretaker) {
-  return {
-    id: caretaker._id,
-    fullName: caretaker.fullName,
-    mobile: caretaker.mobile,
-    email: caretaker.email,
-    status: caretaker.status,
-    userId: caretaker.userId,
-    assignedCitizenId: caretaker.assignedCitizenId,
-    profile: caretaker.profile,
-    createdAt: caretaker.createdAt,
-  };
-}
 
 // ══════════════════════════════════════════════
 //  SEND OTP — login or registration verification, for "citizen" or "caretaker"

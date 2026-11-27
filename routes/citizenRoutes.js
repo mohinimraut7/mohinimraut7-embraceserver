@@ -1,5 +1,6 @@
 const express = require("express");
 const router = express.Router();
+const { protect, allowRoles } = require("../middlewares/auth");
 
 const {
   createCitizen,
@@ -7,16 +8,14 @@ const {
   getCitizenByMobile,
   getAllCitizens,
   updateCitizen,
-  setCitizenPlan,
-  assignCaretakerToCitizen,
+  getMyOverview,
 } = require("../controllers/citizenController");
 
-router.post("/", createCitizen);
-router.get("/", getAllCitizens);
-router.get("/by-mobile/:mobile", getCitizenByMobile);
-router.get("/:id", getCitizenById);
-router.patch("/:id", updateCitizen);
-router.patch("/:id/plan", setCitizenPlan);
-router.patch("/:id/assign-caretaker", assignCaretakerToCitizen);
+router.post("/", createCitizen); // registration (public)
+router.get("/me/overview", protect, allowRoles("citizen"), getMyOverview);
+router.get("/", protect, allowRoles("admin"), getAllCitizens);
+router.get("/by-mobile/:mobile", protect, allowRoles("admin"), getCitizenByMobile);
+router.get("/:id", protect, getCitizenById);
+router.patch("/:id", protect, updateCitizen);
 
 module.exports = router;

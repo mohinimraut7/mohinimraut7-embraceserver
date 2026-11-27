@@ -9,14 +9,20 @@ const citizenSchema = new mongoose.Schema(
     mobile: { type: String, trim: true, required: true, unique: true, index: true },
     email: { type: String, trim: true, lowercase: true, default: "" },
 
+    // Snapshot of the current/last booking (full history lives in Booking)
     selectedPlan: {
       id: { type: String, default: null },
       name: { type: String, default: null },
-      maxHouses: { type: Number, default: null },
+      hoursPerDay: { type: Number, default: null },
+      durationDays: { type: Number, default: null },
       price: { type: mongoose.Schema.Types.Mixed, default: null },
+      startDate: { type: Date, default: null },
+      endDate: { type: Date, default: null },
+      bookingId: { type: String, default: null },
+      maxHouses: { type: Number, default: null }, // legacy (old Silver/Gold/Platinum)
     },
 
-    assignedCaretakerId: { type: String, default: null },
+    assignedCaretakerId: { type: String, default: null }, // primary caretaker on duty (see Assignment for all)
 
     status: {
       type: String,

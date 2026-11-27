@@ -1,30 +1,58 @@
 const bcrypt = require("bcryptjs");
 const Caretaker = require("../models/Caretaker");
 const Citizen = require("../models/Citizen");
+const Assignment = require("../models/Assignment");
+const ServiceRequest = require("../models/ServiceRequest");
+const ActivityLog = require("../models/ActivityLog");
 const generateJwt = require("../utils/generateJwt");
+const { SERVICE_ROLES, SERVICE_ROLE_LABELS, SHIFT_HOURS } = require("../config/plans");
+const {
+  publicCaretaker,
+  publicAssignment,
+  publicRequest,
+  publicActivity,
+  logActivity,
+  refreshExpired,
+} = require("../services/care");
 
-function publicCaretaker(caretaker) {
-  return {
-    id: caretaker._id,
-    fullName: caretaker.fullName,
-    mobile: caretaker.mobile,
-    email: caretaker.email,
-    status: caretaker.status,
-    userId: caretaker.userId,
-    assignedCitizenId: caretaker.assignedCitizenId,
-    profile: caretaker.profile,
-    createdAt: caretaker.createdAt,
-  };
+// Fields the caretaker MUST fill (mirrors required fields of
+// caretakerRegistrationConfig.js on the frontend).
+const REQUIRED_FIELDS = {
+  fullName: "Full Name",
+  dob: "Date of Birth",
+  gender: "Gender",
+  address: "Address",
+  emergencyContact: "Emergency Contact",
+  idNumber: "PAN / Aadhaar Number",
+  serviceRole: "Service Role",
+  shiftHours: "Shift Hours",
+  elderlyCareYears: "Years of Experience",
+};
+
+function readWorkProfile(src = {}) {
+  const out = {};
+  if (SERVICE_ROLES.includes(src.serviceRole)) out.serviceRole = src.serviceRole;
+  const shift = Number(String(src.shiftHours ?? "").replace(/[^\d]/g, ""));
+  if (SHIFT_HOURS.includes(shift)) out.shiftHours = shift;
+  const yrs = Number(src.experienceYears ?? src.elderlyCareYears);
+  if (Number.isFinite(yrs) && yrs >= 0 && String(src.experienceYears ?? src.elderlyCareYears ?? "") !== "") out.experienceYears = yrs;
+  return out;
 }
 
-// POST /api/caretakers  — apply (mirrors frontend createCaretaker(data))
-// body: { mobile, fullName, email, userId, password, ...caretakerRegistrationConfig.js fields }
+// POST /api/caretakers  — apply (public)
 exports.createCaretaker = async (req, res) => {
   try {
     const { mobile, fullName, email, userId, password, ...profileFields } = req.body;
 
     if (!mobile || !/^\d{10}$/.test(String(mobile).trim())) {
       return res.status(400).json({ success: false, message: "Valid 10 digit mobile number required." });
+    }
+    const all = { fullName, ...profileFields };
+    const missing = Object.entries(REQUIRED_FIELDS)
+      .filter(([k]) => all[k] === undefined || all[k] === null || String(all[k]).trim() === "")
+      .map(([, label]) => label);
+    if (missing.length) {
+      return res.status(400).json({ success: false, message: `Please fill: ${missing.join(", ")}` });
     }
 
     const trimmedMobile = String(mobile).trim();
@@ -43,15 +71,25 @@ exports.createCaretaker = async (req, res) => {
 
     const rawPassword = password || profileFields.password || "";
     const hashedPassword = rawPassword ? await bcrypt.hash(rawPassword, 10) : null;
+    delete profileFields.password; // never keep plain password inside profile
 
     const caretaker = await Caretaker.create({
       mobile: trimmedMobile,
-      fullName: fullName || profileFields.fullName || "",
-      email: email || profileFields.email || "",
+      fullName: fullName || "",
+      email: email || "",
       userId: chosenUserId,
       password: hashedPassword,
       status: "pending",
+      ...readWorkProfile(profileFields),
       profile: { mobile: trimmedMobile, fullName, email, userId: chosenUserId, ...profileFields },
+    });
+
+    await logActivity({
+      type: "caretaker.applied",
+      message: `New ${SERVICE_ROLE_LABELS[caretaker.serviceRole]} application — ${caretaker.fullName} (${caretaker.experienceYears} yrs exp, ${caretaker.shiftHours} hr shift)`,
+      actorRole: "caretaker",
+      actorId: String(caretaker._id),
+      caretaker: caretaker._id,
     });
 
     return res.status(201).json({ success: true, caretaker: publicCaretaker(caretaker) });
@@ -61,7 +99,7 @@ exports.createCaretaker = async (req, res) => {
   }
 };
 
-// GET /api/caretakers?status=pending|approved|rejected
+// GET /api/caretakers?status=pending|approved|rejected — admin
 exports.getAllCaretakers = async (req, res) => {
   try {
     const { status } = req.query;
@@ -74,19 +112,73 @@ exports.getAllCaretakers = async (req, res) => {
   }
 };
 
-// GET /api/caretakers/:id
+// GET /api/caretakers/:id — admin (full profile + duties + history) or self
 exports.getCaretakerById = async (req, res) => {
   try {
+    if (req.user.role !== "admin" && String(req.user.id) !== String(req.params.id)) {
+      return res.status(403).json({ success: false, message: "Access denied." });
+    }
     const caretaker = await Caretaker.findById(req.params.id);
     if (!caretaker) return res.status(404).json({ success: false, message: "Caretaker not found." });
-    return res.status(200).json({ success: true, caretaker: publicCaretaker(caretaker) });
+
+    await refreshExpired();
+    const [assignments, requests, activity] = await Promise.all([
+      Assignment.find({ caretaker: caretaker._id }).populate("citizen").sort({ createdAt: -1 }),
+      ServiceRequest.find({ caretaker: caretaker._id }).populate("citizen").sort({ createdAt: -1 }),
+      ActivityLog.find({ caretaker: caretaker._id }).sort({ createdAt: -1 }).limit(200),
+    ]);
+    return res.status(200).json({
+      success: true,
+      caretaker: publicCaretaker(caretaker),
+      assignments: assignments.map(publicAssignment),
+      requests: requests.map(publicRequest),
+      activity: activity.map(publicActivity),
+    });
   } catch (error) {
     console.error("getCaretakerById Error:", error);
     return res.status(500).json({ success: false, message: "Server error." });
   }
 };
 
-// GET /api/caretakers/available?maxHouses=5 — mirrors findAvailableCaretaker
+// GET /api/caretakers/me/overview — logged-in caretaker's own dashboard data
+exports.getMyOverview = async (req, res) => {
+  try {
+    await refreshExpired();
+    const caretaker = await Caretaker.findById(req.user.id);
+    if (!caretaker) return res.status(404).json({ success: false, message: "Caretaker not found." });
+
+    const assignments = await Assignment.find({ caretaker: caretaker._id }).populate("citizen").sort({ slotStart: 1 });
+    const activeCitizenIds = assignments.filter((a) => a.status === "active").map((a) => a.citizen?._id);
+    const requests = await ServiceRequest.find({
+      $or: [{ caretaker: caretaker._id }, { citizen: { $in: activeCitizenIds }, targetRole: "caretaker", caretaker: null }],
+    })
+      .populate("citizen")
+      .populate("caretaker")
+      .sort({ createdAt: -1 });
+
+    // Full citizen records for the households currently on duty (care notes etc.)
+    const citizens = await Citizen.find({ _id: { $in: activeCitizenIds } });
+
+    return res.status(200).json({
+      success: true,
+      caretaker: publicCaretaker(caretaker),
+      assignments: assignments.map(publicAssignment),
+      citizens: citizens.map((c) => ({
+        id: String(c._id),
+        fullName: c.fullName,
+        mobile: c.mobile,
+        selectedPlan: c.selectedPlan,
+        profile: c.profile,
+      })),
+      requests: requests.map(publicRequest),
+    });
+  } catch (error) {
+    console.error("getMyOverview Error:", error);
+    return res.status(500).json({ success: false, message: "Server error." });
+  }
+};
+
+// GET /api/caretakers/available?maxHouses=5 — legacy (old house-based plans)
 exports.findAvailableCaretaker = async (req, res) => {
   try {
     const maxHouses = Number(req.query.maxHouses) || 0;
@@ -105,15 +197,21 @@ exports.findAvailableCaretaker = async (req, res) => {
   }
 };
 
-// PATCH /api/caretakers/:id/approve — mirrors approveCaretaker(id)
+// PATCH /api/caretakers/:id/approve — admin. Optional body lets admin confirm
+// the work profile while approving: { serviceRole, shiftHours, experienceYears }
 exports.approveCaretaker = async (req, res) => {
   try {
-    const caretaker = await Caretaker.findByIdAndUpdate(
-      req.params.id,
-      { status: "approved" },
-      { new: true }
-    );
+    const update = { status: "approved", approvedAt: new Date(), rejectionReason: "", ...readWorkProfile(req.body || {}) };
+    const caretaker = await Caretaker.findByIdAndUpdate(req.params.id, update, { new: true });
     if (!caretaker) return res.status(404).json({ success: false, message: "Caretaker not found." });
+
+    await logActivity({
+      type: "caretaker.approved",
+      message: `${caretaker.fullName} approved as ${SERVICE_ROLE_LABELS[caretaker.serviceRole]} (${caretaker.shiftHours} hr shift)`,
+      actorRole: "admin",
+      actorId: req.user?.id,
+      caretaker: caretaker._id,
+    });
     return res.status(200).json({ success: true, caretaker: publicCaretaker(caretaker) });
   } catch (error) {
     console.error("approveCaretaker Error:", error);
@@ -121,15 +219,23 @@ exports.approveCaretaker = async (req, res) => {
   }
 };
 
-// PATCH /api/caretakers/:id/reject — mirrors rejectCaretaker(id)
+// PATCH /api/caretakers/:id/reject — admin  { reason? }
 exports.rejectCaretaker = async (req, res) => {
   try {
     const caretaker = await Caretaker.findByIdAndUpdate(
       req.params.id,
-      { status: "rejected" },
+      { status: "rejected", rejectionReason: req.body?.reason || "" },
       { new: true }
     );
     if (!caretaker) return res.status(404).json({ success: false, message: "Caretaker not found." });
+
+    await logActivity({
+      type: "caretaker.rejected",
+      message: `${caretaker.fullName} application rejected${req.body?.reason ? ` — ${req.body.reason}` : ""}`,
+      actorRole: "admin",
+      actorId: req.user?.id,
+      caretaker: caretaker._id,
+    });
     return res.status(200).json({ success: true, caretaker: publicCaretaker(caretaker) });
   } catch (error) {
     console.error("rejectCaretaker Error:", error);
@@ -137,8 +243,33 @@ exports.rejectCaretaker = async (req, res) => {
   }
 };
 
-// POST /api/caretakers/login — username/mobile + password (the "Already
-// Approved" tab's credentials login — mirrors verifyCaretakerLogin)
+// PATCH /api/caretakers/:id — admin edits work profile
+// body: { serviceRole?, shiftHours?, experienceYears?, isActive? }
+exports.updateCaretaker = async (req, res) => {
+  try {
+    const update = readWorkProfile(req.body || {});
+    if (typeof req.body?.isActive === "boolean") update.isActive = req.body.isActive;
+    if (!Object.keys(update).length) {
+      return res.status(400).json({ success: false, message: "Nothing to update." });
+    }
+    const caretaker = await Caretaker.findByIdAndUpdate(req.params.id, update, { new: true });
+    if (!caretaker) return res.status(404).json({ success: false, message: "Caretaker not found." });
+
+    await logActivity({
+      type: "caretaker.updated",
+      message: `${caretaker.fullName} profile updated — ${SERVICE_ROLE_LABELS[caretaker.serviceRole]}, ${caretaker.experienceYears} yrs exp, ${caretaker.shiftHours} hr shift${caretaker.isActive ? "" : ", PAUSED"}`,
+      actorRole: "admin",
+      actorId: req.user.id,
+      caretaker: caretaker._id,
+    });
+    return res.status(200).json({ success: true, caretaker: publicCaretaker(caretaker) });
+  } catch (error) {
+    console.error("updateCaretaker Error:", error);
+    return res.status(500).json({ success: false, message: "Server error." });
+  }
+};
+
+// POST /api/caretakers/login — User ID/mobile + password (public)
 exports.loginWithCredentials = async (req, res) => {
   try {
     const { identifier, password } = req.body;

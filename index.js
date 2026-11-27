@@ -7,6 +7,7 @@ const seedAdmin = require("./utils/seedAdmin");
 const authRoutes = require("./routes/authRoutes");
 const citizenRoutes = require("./routes/citizenRoutes");
 const caretakerRoutes = require("./routes/caretakerRoutes");
+const careRoutes = require("./routes/careRoutes");
 
 const app = express();
 
@@ -22,6 +23,7 @@ connectDB().then(seedAdmin);
 app.use("/api/auth", authRoutes);
 app.use("/api/citizens", citizenRoutes);
 app.use("/api/caretakers", caretakerRoutes);
+app.use("/api", careRoutes); // plans, bookings, assignments, requests, admin data, activity
 
 // ── Health check ──
 app.get("/", (req, res) => {
